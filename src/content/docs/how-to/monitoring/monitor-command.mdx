@@ -1,0 +1,56 @@
+---
+title: MONITOR Command
+description: Use the MONITOR command for real-time debugging of all commands processed by the Valkey server.
+---
+
+The Valkey [`MONITOR`](https://valkey.io/commands/monitor/) command streams back every command processed by the server in real-time. It is a powerful debugging and diagnostics tool that lets you observe exactly what operations are hitting your Valkey instance.
+
+:::caution[FFI Only]
+Language client wrappers (Python, Node.js, Java, Go) have **not** been implemented yet. The MONITOR functionality is currently accessible only via the core/FFI layer.
+:::
+
+## How it works in GLIDE
+
+GLIDE provides a dedicated `MonitorClient` in the core/FFI layer that wraps the MONITOR command. Rather than returning raw strings, it parses each line from the MONITOR stream into structured `MonitorLine` objects delivered via callback-based streaming.
+
+The FFI layer exposes two functions:
+
+- `create_monitor_client()` — creates and starts the monitor connection
+- `close_monitor_client()` — performs a clean shutdown
+
+## Architecture
+
+The `MonitorClient` operates with the following design:
+
+- **Dedicated connection** — uses a standalone, non-pooled connection separate from your regular command connections.
+- **Forces RESP2** — the MONITOR protocol requires RESP2, so the client forces this regardless of your configured protocol version.
+- **Callback-based streaming** — parsed `MonitorLine` structs are delivered to a registered callback as they arrive.
+- **Clean shutdown** — call `stop_async()` to gracefully close the monitor stream and release the connection.
+
+## MonitorLine fields
+
+Each parsed line from the MONITOR stream contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | `f64` | Unix timestamp of when the command was processed |
+| `db` | `i64` | Database index the command was executed against |
+| `client_addr` | `String` | Address (`ip:port`) of the client that sent the command |
+| `command` | `String` | The command name (e.g., `SET`, `GET`) |
+| `args` | `Vec<String>` | Arguments passed to the command |
+
+## Use cases
+
+- **Debugging command flow** — observe the exact sequence of commands reaching the server to diagnose unexpected behavior.
+- **Auditing** — log all commands for compliance or security review.
+- **Performance analysis** — identify hot keys, command frequency, or unexpected command patterns in real-time.
+
+:::note
+MONITOR adds overhead to the server since it must broadcast every command to all monitoring clients. Use it for diagnostics, not in production under high load.
+:::
+
+## Limitations
+
+- **Standalone only** — cluster mode is not supported.
+- **No auto-reconnect** — if the connection drops, the stream ends. The caller must create a new `MonitorClient` to resume monitoring.
+- **Language wrappers pending** — only available via the core/FFI layer until language-specific wrappers are implemented.

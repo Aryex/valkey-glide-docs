@@ -1,14 +1,19 @@
 ---
 title: "Client-Side Caching"
-description: Learn about Valkey GLIDE's TTL-based client-side caching feature.
+description: Learn about Valkey GLIDE's client-side caching with TTL-based expiration and server-assisted invalidation.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
 Client-side caching in Valkey GLIDE stores responses from cacheable read commands in a local in-memory cache on the client, reducing network round-trips and server load. When a cached command is issued again, the response is served directly from local memory without contacting the server.
 
-<Aside type="caution" title="TTL-Only Caching">
-  The current implementation uses **TTL-based expiration only**. There is no server-side invalidation — cached entries may become stale before their TTL expires if **any client** modifies the underlying data, **including the same client that cached the value**. A read issued immediately after the same client's `SET` / `HSET` / `SADD` / `DEL` will still return the cached value until its TTL expires. Server-side tracking-based invalidation (using the [`CLIENT TRACKING`](https://valkey.io/commands/client-tracking/) protocol) will be added in a future release.
+<Aside type="note" title="Caching Modes">
+  GLIDE supports two cache invalidation modes:
+
+  - **TTL-only (default)** — Cached entries expire after a configured time-to-live. Simple and works with all deployments, but entries may become stale if data changes before the TTL expires.
+  - **Server-assisted invalidation** — When `serverAssisted: true` is set, GLIDE uses [`CLIENT TRACKING ON BCAST`](https://valkey.io/commands/client-tracking/) to receive push notifications from the server when cached keys are modified. This ensures the local cache stays consistent with the server. Requires RESP3 protocol.
+
+  Language client wrappers (Python, Node, Java, Go) do not yet expose the `serverAssisted` parameter — it is currently available at the core/protocol level only. Language support will be added in upcoming releases.
 </Aside>
 
 ## How It Works
@@ -35,6 +40,34 @@ All other commands bypass the cache entirely. Write commands (`SET`, `HSET`, `SA
 
 * **NIL responses** — If a key does not exist, the `nil` response is not stored in the cache.
 * **Entries larger than the cache** — If a single entry exceeds `maxCacheKb`, it is silently skipped.
+
+## Server-Assisted Invalidation
+
+Server-assisted invalidation uses Valkey's [`CLIENT TRACKING ON BCAST`](https://valkey.io/commands/client-tracking/) protocol to keep the local cache consistent with the server. Instead of relying solely on TTL expiration, the server pushes invalidation messages to the client whenever cached keys are modified.
+
+### How it works
+
+When `serverAssisted: true` is configured, GLIDE automatically:
+
+1. Sends `CLIENT TRACKING ON BCAST` on initial connection setup.
+2. Re-sends `CLIENT TRACKING ON BCAST` on every reconnect, ensuring tracking is never silently lost.
+3. Processes incoming `Invalidate` push messages from the server:
+   - **Key-specific invalidation** — The message contains one or more key names. GLIDE evicts those keys from the local cache immediately.
+   - **Nil invalidation** — The message contains a nil payload (e.g., after a `FLUSHDB`). GLIDE flushes the entire local cache.
+
+### Requirements
+
+- **RESP3 protocol is required.** Server push messages used by `CLIENT TRACKING` are only available over RESP3. Configuring `serverAssisted: true` with RESP2 returns an `InvalidClientConfig` error at client creation time.
+- **Valkey 7.2+ or Redis OSS 6.0+** — The server must support `CLIENT TRACKING`.
+
+### Cluster support
+
+In cluster mode, GLIDE enables tracking on **all node connections** automatically. When a key is modified on any node, the invalidation message is delivered to the client and the corresponding local cache entry is evicted.
+
+### Limitations of server-assisted mode
+
+- **BCAST mode only** — GLIDE uses broadcasting mode, which tracks all keys. `OPTIN` and `OPTOUT` modes are not supported.
+- **Language client support pending** — The `serverAssisted` parameter is available at the core/protocol level. Language client wrappers (Python, Node, Java, Go) will expose it in upcoming releases.
 
 ## Configuration
 
@@ -179,6 +212,7 @@ To enable client-side caching, pass a `ClientSideCache` configuration when creat
 | `entryTtlMs`      | integer           | —       | Time-to-live per entry in milliseconds. Use `0` to disable TTL (entries persist until evicted).   |
 | `evictionPolicy`   | `LRU` or `LFU`   | `LRU`   | Policy for removing entries when the cache is full.                                               |
 | `enableMetrics`    | boolean           | `false` | When `true`, enables collection of hit/miss/eviction/expiration counters.                         |
+| `serverAssisted`   | boolean           | `false` | When `true`, enables server-assisted cache invalidation via `CLIENT TRACKING ON BCAST`. Requires RESP3 protocol. |
 
 ## Eviction Policies
 
@@ -382,22 +416,24 @@ Multiple clients can share the same cache instance by passing the same `ClientSi
 
 | Limitation | Details |
 | --- | --- |
-| **TTL-only expiration** | No server-side invalidation. Cached values may become stale if the key is modified on the server before the TTL expires. |
+| **TTL-only expiration (default mode)** | In the default mode, there is no server-side invalidation. Cached values may become stale if the key is modified on the server before the TTL expires. Enable `serverAssisted` mode for real-time invalidation. |
 | **Lazy expiration** | Expired entries are cleaned up on access, not proactively in the background. |
 | **Limited command coverage** | Only `GET`, `HGETALL`, and `SMEMBERS` are cached. Other read commands are not cached. |
 | **NIL not cached** | If a key does not exist, the nil response is not stored. |
-| **No invalidation on writes** | Writing to a key (e.g., `SET`, `HSET`, `SADD`, `DEL`) does not invalidate the local cache entry — even when the write is issued by the same client that has the value cached. Subsequent reads return the stale value until its TTL expires or it is evicted under memory pressure. |
+| **No invalidation on writes (TTL-only mode)** | In TTL-only mode, writing to a key (e.g., `SET`, `HSET`, `SADD`, `DEL`) does not invalidate the local cache entry — even when the write is issued by the same client. With server-assisted mode enabled, the server pushes invalidation messages that evict modified keys from the cache automatically. |
+| **BCAST mode only** | Server-assisted invalidation uses broadcasting mode exclusively. `OPTIN` and `OPTOUT` tracking modes are not supported. |
+| **RESP3 required for server-assisted mode** | The `serverAssisted` option requires RESP3 protocol. Using it with RESP2 returns an `InvalidClientConfig` error. |
 
 ### Compatibility with managed services
 
-GLIDE does not currently support the `CLIENT TRACKING` command. When server-driven invalidation lands in a future release, it will rely on Valkey's [`CLIENT TRACKING`](https://valkey.io/commands/client-tracking/) subcommand. Not every deployment exposes that command. The table below summarizes where the feature will be available once it ships:
+Server-assisted invalidation relies on Valkey's [`CLIENT TRACKING`](https://valkey.io/commands/client-tracking/) subcommand, which is now supported at the GLIDE core level. Not every deployment exposes that command. The table below summarizes where the feature is available:
 
 | Deployment                                                          | Exposes `CLIENT TRACKING`? | Notes                                                                                                                                                                                                                                                       |
 | ------------------------------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Self-managed Valkey or Redis OSS                                    | ✅ Yes                     | Requires Valkey 7.2+ / Redis OSS 6.0+ (any version that supports `CLIENT TRACKING`).                                                                                                                                                                        |
 | Amazon MemoryDB                                                     | ✅ Yes                     | Standard `CLIENT` surface available.                                                                                                                                                                                                                        |
 | Amazon ElastiCache (cluster-mode replication group, non-serverless) | ✅ Yes                     | Standard `CLIENT` surface available.                                                                                                                                                                                                                        |
-| Amazon ElastiCache **Serverless**                                   | ❌ No                      | Only `CLIENT GETNAME / SETNAME / REPLY / HELP` are exposed; `CLIENT TRACKING` returns `ERR unknown subcommand 'tracking'`. The TTL-only behavior described above will continue to apply on Serverless even after server-driven invalidation lands in GLIDE. |
+| Amazon ElastiCache **Serverless**                                   | ❌ No                      | Only `CLIENT GETNAME / SETNAME / REPLY / HELP` are exposed; `CLIENT TRACKING` returns `ERR unknown subcommand 'tracking'`. The TTL-only behavior will continue to apply on Serverless. Use TTL-based caching and plan around eventual staleness. |
 
 If your deployment is in the last row, plan around the TTL-only model: cache only data that is immutable or can tolerate staleness up to its TTL.
 
@@ -411,24 +447,25 @@ The metrics counters give you an objective way to confirm caching is doing what 
 | 2    | `GET k`             | Cache **miss**, populates the entry. `entryCount=1`, `totalLookups=1`, `hitRate≈0`.                                                                       |
 | 3    | `GET k`             | Cache **hit**. `totalLookups=2`, `hitRate≈0.5`.                                                                                                           |
 | 4    | `GET nonexistent`   | Cache miss; the `nil` reply is **not** cached. `entryCount` stays at `1`, `missRate` rises.                                                               |
-| 5    | `SET k v2`          | Server-only. **The cache still holds `v1`** — no invalidation, even though the same client just wrote.                                                   |
-| 6    | `GET k`             | Returns `v1` — the stale cached value. The cache catches up only after the entry's TTL expires or the entry is evicted under memory pressure.            |
+| 5    | `SET k v2`          | Server-only. **In TTL-only mode, the cache still holds `v1`** — no invalidation. With `serverAssisted` mode enabled, the server would push an invalidation message and GLIDE would evict the stale entry immediately.                                                   |
+| 6    | `GET k`             | In TTL-only mode: returns `v1` — the stale cached value, until the entry's TTL expires or it is evicted. In server-assisted mode: cache miss (entry was invalidated), fetches fresh `v2` from server.            |
 
 ### Confirming the limit on the same client
 
-The biggest surprise for new users is that the cache does **not** clear after the *same* client writes a key it had cached. You can confirm this with a single client and four operations:
+The biggest surprise for new users is that in TTL-only mode, the cache does **not** clear after the *same* client writes a key it had cached. You can confirm this with a single client and four operations:
 
 1. `SET k "before"`
 2. `GET k` (populates the cache).
 3. `SET k "after"` (writes go through to the server; the cache is untouched).
 4. `GET k` → returns `"before"` until the entry's TTL expires.
 
-This is the expected behavior of the TTL-only implementation. Until server-driven invalidation lands, treat any key the application writes to as **not safely cacheable**, regardless of which client performs the write.
+This is the expected behavior of the TTL-only implementation. With server-assisted mode enabled, step 4 would return `"after"` because the server invalidates the cached entry upon the write in step 3.
 
 ## Best Practices
 
 * **Set an appropriate TTL** — Choose a TTL that balances freshness with cache effectiveness. Shorter TTLs reduce staleness risk; longer TTLs improve hit rates.
 * **Size the cache appropriately** — Monitor eviction counts. High eviction rates indicate the cache is too small for the working set.
 * **Use metrics to tune** — Enable metrics during development and load testing to understand cache behavior and optimize configuration.
-* **Use only for read-heavy, slow-changing data** — Until server-driven invalidation ships, restrict the cache to values that can tolerate staleness up to your TTL: configuration, lookup tables, slow-changing reference data, computed projections rebuilt out-of-band, and similar. Avoid caching any key that the application itself writes to during its lifetime — reads after the write will return stale data.
+* **Choose the right mode for your workload** — Use server-assisted mode (`serverAssisted: true`) when data consistency is critical and your deployment supports `CLIENT TRACKING`. Use TTL-only mode for deployments that don't expose `CLIENT TRACKING` (e.g., ElastiCache Serverless), or when you want simpler behavior for data that can tolerate staleness up to the TTL window.
+* **Use TTL-only mode for read-heavy, slow-changing data** — In TTL-only mode, restrict the cache to values that can tolerate staleness: configuration, lookup tables, slow-changing reference data, and similar. Avoid caching keys that the application writes to frequently.
 * **Avoid sharing caches across databases** — Keys in different databases may have the same name but different values.

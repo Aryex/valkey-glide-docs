@@ -25,3 +25,22 @@ Valkey (and Redis) clusters support commands that operate on multiple keys which
 GLIDE cluster awareness allows it to efficiently handles these commands, ensuring correct executions across the cluster.
 
 To learn more about multi-key commands, see this [section](/concepts/client-features/multi-slot-command-handling/).
+
+## Redirect Handling
+
+When the cluster topology changes or a slot migrates to a different node, the server returns a MOVED error directing the client to the correct node.
+GLIDE automatically follows these redirects and refreshes its internal slot map so subsequent commands route correctly without any application-level intervention.
+
+### Circular MOVED Redirects
+
+When Valkey servers are deployed behind DNS records, load balancers, or proxies, a MOVED error may point back to the same endpoint the client is already connected to.
+This creates a "circular" redirect — previously, this could cause commands to fail because the connection was already closed by the server after sending the MOVED response.
+
+GLIDE now automatically detects circular MOVED redirects and triggers a connection refresh before retrying the command.
+This allows the DNS, proxy, or load balancer to route the new connection to a different underlying server, resolving the redirect.
+
+This behavior:
+
+- Applies to both single commands and pipeline commands.
+- Handles hostname/IP mismatches (e.g., connected via hostname but MOVED returns an IP address).
+- Requires no configuration — it is entirely automatic.

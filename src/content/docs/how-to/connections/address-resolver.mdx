@@ -1,0 +1,85 @@
+---
+title: Custom Address Resolution
+---
+
+GLIDE's Node.js client supports a **custom address resolver**, which allows you to provide a synchronous callback that transforms server addresses before connection. The resolver is invoked for each configured address during connection establishment and during cluster topology refreshes.
+
+This is useful for service discovery, proxy setups, and dynamic endpoint resolution in cloud environments.
+
+## Configuration
+
+Add an `addressResolver` callback to your client configuration. The callback receives a host and port, and must return a `[string, number]` tuple with the resolved address.
+
+```typescript
+import { GlideClient, GlideClusterClient } from "@valkey/valkey-glide";
+
+const client = await GlideClient.createClient({
+    addresses: [{ host: "internal-valkey.service", port: 6379 }],
+    addressResolver: (host: string, port: number): [string, number] => {
+        // Resolve to a different address
+        return ["actual-host.example.com", 6380];
+    },
+});
+```
+
+## Use Cases
+
+### Proxy Address Translation
+
+Translate internal cluster addresses to proxy endpoints when connecting through a network proxy:
+
+```typescript
+const PROXY_MAP: Record<string, [string, number]> = {
+    "node-1.internal:6379": ["proxy.example.com", 7001],
+    "node-2.internal:6379": ["proxy.example.com", 7002],
+    "node-3.internal:6379": ["proxy.example.com", 7003],
+};
+
+const client = await GlideClusterClient.createClient({
+    addresses: [{ host: "proxy.example.com", port: 7001 }],
+    addressResolver: (host, port) => {
+        return PROXY_MAP[`${host}:${port}`] ?? [host, port];
+    },
+});
+```
+
+### Service Discovery
+
+Resolve addresses using a local service registry or cached DNS lookup:
+
+```typescript
+import { lookupServiceSync } from "./service-registry";
+
+const client = await GlideClient.createClient({
+    addresses: [{ host: "valkey-primary", port: 6379 }],
+    addressResolver: (host, port) => {
+        const resolved = lookupServiceSync(host);
+        return [resolved.ip, resolved.port];
+    },
+});
+```
+
+### Cloud Environment Endpoint Resolution
+
+Map private IPs returned by cluster topology to public endpoints:
+
+```typescript
+const client = await GlideClusterClient.createClient({
+    addresses: [{ host: "cluster.cloud-provider.com", port: 6379 }],
+    addressResolver: (host, port) => {
+        // Replace private VPC IPs with the public endpoint
+        if (host.startsWith("10.0.")) {
+            return ["cluster.cloud-provider.com", port];
+        }
+        return [host, port];
+    },
+});
+```
+
+## Behavior and Limitations
+
+- **Synchronous only**: The resolver must be synchronous. Async resolvers (returning a Promise) are not supported.
+- **Fallback on failure**: If the resolver throws an exception or returns an invalid value, the original address is used.
+- **Main thread execution**: The resolver runs on the Node.js main thread. Avoid long-running logic that could block the event loop.
+- **Automatic cleanup**: The resolver is automatically removed from the internal registry when the client is closed or connection fails.
+- **Node.js only**: This feature is currently available only in the Node.js client.

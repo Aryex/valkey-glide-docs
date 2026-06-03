@@ -1,0 +1,85 @@
+---
+title: Address Resolver
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The address resolver feature allows you to provide a custom callback that translates server addresses during connection establishment and cluster topology refreshes. This is useful for custom DNS resolution, proxy-based address translation, or dynamic endpoint resolution in cloud environments.
+
+## Configuration
+
+The `addressResolver` option accepts a synchronous callback that receives a host and port, and returns a translated `[host, port]` tuple.
+
+<Tabs syncKey="progLangInExamples">
+  <TabItem label="C#">
+    :::note
+    This feature is not yet available in GLIDE C#.
+    :::
+  </TabItem>
+
+  <TabItem label="Go">
+    :::note
+    This feature is not yet available in GLIDE Go.
+    :::
+  </TabItem>
+
+  <TabItem label="Java">
+    :::note
+    This feature is not yet available in GLIDE Java.
+    :::
+  </TabItem>
+
+  <TabItem label="Node">
+    ```typescript
+    import { GlideClient, GlideClusterClient } from "@valkey/valkey-glide";
+
+    // Standalone client with address resolution
+    const client = await GlideClient.createClient({
+        addresses: [{ host: "internal-service.local", port: 6379 }],
+        addressResolver: (host: string, port: number): [string, number] => {
+            // Translate internal hostnames to actual endpoints
+            if (host === "internal-service.local") {
+                return ["10.0.1.100", port];
+            }
+            return [host, port];
+        },
+    });
+
+    // Cluster client — resolver is also invoked during topology refreshes
+    const clusterClient = await GlideClusterClient.createClient({
+        addresses: [{ host: "cluster.proxy.local", port: 6380 }],
+        addressResolver: (host: string, port: number): [string, number] => {
+            // Map cluster node addresses through a proxy
+            return ["proxy.internal", port + 1000];
+        },
+    });
+    ```
+  </TabItem>
+
+  <TabItem label="PHP">
+    :::note
+    This feature is not yet available in GLIDE PHP.
+    :::
+  </TabItem>
+
+  <TabItem label="Python">
+    :::note
+    This feature is not yet available in GLIDE Python.
+    :::
+  </TabItem>
+</Tabs>
+
+## How It Works
+
+1. **Registration** — The resolver callback is registered in a global registry before the connection is established.
+2. **Invocation** — The resolver is called for each configured address during initial connection and during cluster topology refreshes (for cluster clients).
+3. **Cleanup** — The resolver is automatically removed from the global registry when the client is closed or if the connection fails.
+
+## Fallback Behavior
+
+If the resolver throws an exception or returns an invalid value, the original address is used as a fallback. This ensures that a faulty resolver does not prevent the client from connecting.
+
+## Limitations
+
+- The resolver callback must be **synchronous** — async resolvers are not supported.
+- The resolver runs on the Node.js main thread. Long-running resolution logic could block the event loop and degrade application performance.

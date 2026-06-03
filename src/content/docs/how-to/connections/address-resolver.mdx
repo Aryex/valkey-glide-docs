@@ -18,9 +18,36 @@ The `addressResolver` option accepts a synchronous callback that receives a host
   </TabItem>
 
   <TabItem label="Go">
-    :::note
-    This feature is not yet available in GLIDE Go.
-    :::
+    ```go
+    import (
+        "github.com/valkey-io/valkey-glide/go/v2"
+        "github.com/valkey-io/valkey-glide/go/v2/config"
+    )
+
+    // Define the address resolver function
+    resolver := func(host string, port int) (string, int) {
+        // Translate internal hostnames to actual endpoints
+        if host == "internal-service.local" {
+            return "10.0.1.100", port
+        }
+        return host, port
+    }
+
+    // Standalone client with address resolution
+    clientConfig := config.NewClientConfiguration().
+        WithAddress(&config.NodeAddress{Host: "internal-service.local", Port: 6379}).
+        WithAddressResolver(resolver)
+    client, err := glide.NewClient(clientConfig)
+
+    // Cluster client — resolver is also invoked during topology refreshes
+    clusterConfig := config.NewClusterClientConfiguration().
+        WithAddress(&config.NodeAddress{Host: "cluster.proxy.local", Port: 6380}).
+        WithAddressResolver(func(host string, port int) (string, int) {
+            // Map cluster node addresses through a proxy
+            return "proxy.internal", port + 1000
+        })
+    clusterClient, err := glide.NewClusterClient(clusterConfig)
+    ```
   </TabItem>
 
   <TabItem label="Java">
@@ -81,5 +108,5 @@ If the resolver throws an exception or returns an invalid value, the original ad
 
 ## Limitations
 
-- The resolver callback must be **synchronous** — async resolvers are not supported.
-- The resolver runs on the Node.js main thread. Long-running resolution logic could block the event loop and degrade application performance.
+- **Node.js**: The resolver callback must be **synchronous** — async resolvers are not supported. The resolver runs on the Node.js main thread; long-running resolution logic could block the event loop.
+- **Go**: The resolver uses a global registry pattern — if multiple clients are created with different resolvers, each client keeps its own resolver, but the resolver must be safe for concurrent use from multiple goroutines. If the resolver panics or returns an empty host or port 0, the original address is used as fallback.

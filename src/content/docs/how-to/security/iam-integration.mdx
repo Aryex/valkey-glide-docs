@@ -31,6 +31,29 @@ For GLIDE versions below 2.2, see the [guide](/how-to/security/iam-integration-u
 * **region**: The AWS region where your cluster runs
 * **refresh\_interval\_seconds (Optional)**: How often to refresh the token. Default is **300 seconds (5 minutes)**
 
+## Advanced Configuration
+
+### Custom STS Endpoint
+
+GLIDE honors the `AWS_ENDPOINT_URL_STS` environment variable to override the STS endpoint used during credential acquisition. This is useful when the default endpoint resolution does not work for your environment.
+
+**When you need this:**
+
+* **AWS GovCloud regions** (e.g., `us-gov-west-1`) — the default FIPS endpoint resolution may fail because the SDK attempts to reach a non-existent `sts-fips.<region>.amazonaws.com` hostname
+* Any environment requiring a custom or regional STS endpoint
+
+**Example:**
+
+```bash
+export AWS_ENDPOINT_URL_STS=https://sts.us-gov-west-1.amazonaws.com
+```
+
+:::note
+The URL **must** use `https://`. Non-HTTPS values are rejected to prevent credentials from being transmitted in plaintext. Whitespace-only values are treated as unset.
+:::
+
+This setting only affects the STS call for credential acquisition — it does not change how GLIDE connects to your ElastiCache or MemoryDB cluster.
+
 ## Examples
 
 <Tabs syncKey="progLangInExamples">
